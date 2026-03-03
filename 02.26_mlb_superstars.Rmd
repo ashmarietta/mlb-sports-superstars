@@ -1,0 +1,269 @@
+---
+title: "02.26_mlb_superstars"
+author: "Ashley Marietta"
+date: "2026-02-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r cars}
+source("elo_funcs.r")
+library(gtools)
+library(readxl)
+library(ggridges)
+library(ggExtra)
+library(caret)
+library(ggplot2)
+library(cluster)
+library(factoextra)
+library(dendextend)
+library(circlize)
+theme_set(theme_bw())
+library(rpart)
+library(rattle)
+library(rpart.plot)
+library(RColorBrewer)
+library(party)
+library(partykit)
+library(reshape2)
+library(splitstackshape)
+library(plotmo)
+library(glmnet)
+library(shapviz)
+library(xgboost)
+```
+
+read in data:
+```{r}
+dataattend <- read_excel("02.26_base_data.xlsx")
+head(dataattend)
+attendance <- dataattend$attend_game
+```
+
+```{r}
+datawar <- read_excel("02.26_base_data.xlsx", sheet="WAR")
+head(datawar)
+war <- datawar$war
+player <- datawar$player
+team <- datawar$team
+year <- datawar$year
+```
+
+```{r}
+datawl <- read_excel("02.26_base_data.xlsx", sheet="WIN_PCT")
+head(datawl)
+wl <- datawl$w_l
+```
+
+```{r}
+datamarket <- read_excel("02.26_base_data.xlsx", sheet="MARKET_SIZE")
+head(datamarket)
+market <- datamarket$population
+```
+
+count number of stars per team:
+```{r}
+datawar$star <- ifelse(datawar$war >= 5, 1, 0)
+starperteam <- aggregate(star ~ team + year, data = datawar, sum)
+names(starperteam)[3] <- "stars_per_team"
+starperteam
+any(duplicated(starperteam[, c("team","year")]))
+```
+
+```{r}
+wl_clean <- aggregate(
+  w_l ~ team + year,
+  data = datawl,
+  mean,
+  na.rm = TRUE
+)
+```
+
+```{r}
+starperteam <- aggregate(
+  star ~ team + year,
+  data = datawar,
+  sum
+)
+
+colnames(starperteam)[3] <- "stars_per_team"
+any(duplicated(starperteam[, c("team","year")]))
+```
+
+```{r}
+attendance_clean <- dataattend[, c("team","attend_game","attendance","payroll", "year")]
+attendance_clean <- attendance_clean[!duplicated(attendance_clean[, c("team", "year")]), ]
+```
+
+```{r}
+market_clean <- datamarket[, c("team","population")]
+market_clean <- market_clean[!duplicated(market_clean[,c("team")]), ]
+```
+
+simple, clean dataframe without player-specific data:
+```{r}
+alldata1 <- merge(wl_clean, starperteam,
+                 by = c("team","year"),
+                 all.x = TRUE)
+
+alldata1$stars_per_team[is.na(alldata1$stars_per_team)] <- 0
+
+alldata1 <- merge(alldata1, market_clean,
+                 by = "team",
+                 all.x = TRUE)
+
+alldata1 <- merge(alldata1, attendance_clean,
+                 by = c("team","year"),
+                 all.x = TRUE)
+any(duplicated(alldata1[, c("team","year")]))
+alldata1
+```
+
+stars vs. attendance scatter plot:
+```{r}
+ggplot(alldata1, aes(x = stars_per_team, y = attend_game)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Star Players vs. Game Attendance",
+       x = "Number of Star Players (WAR ≥ 5)",
+       y = "Average Game Attendance")
+```
+
+stars vs. attendance boxplot:
+```{r}
+ggplot(alldata1,
+       aes(x = factor(stars_per_team),
+           y = attend_game)) +
+  geom_boxplot() +
+  labs(title = "Attendance by Number of Star Players",
+       x = "Number of Star Players (WAR ≥ 5)",
+       y = "Average Game Attendance") +
+  theme_bw()
+```
+
+stars vs. winning percentage scatter plot:
+```{r}
+ggplot(alldata1,
+       aes(x = stars_per_team,
+           y = w_l)) +
+  geom_jitter(width = 0.15, height = 0, alpha = 0.7, size = 3) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Star Players vs. Winning Percentage",
+       x = "Number of Star Players (WAR ≥ 5)",
+       y = "Winning Percentage") +
+  theme_bw()
+```
+
+linear regression model:
+```{r}
+attendanceg <- alldata1$attend_game
+team <- alldata1$team
+w_l <- alldata1$w_l
+stars_per_team <- alldata1$stars_per_team
+population <- alldata1$population
+payroll <- alldata1$payroll
+fit <- lm(attendanceg ~ w_l + stars_per_team + population + payroll,
+            data = alldata1)
+summary(fit)
+```
+
+lasso model:
+```{r}
+alldata2 <- subset(alldata1,select=-(team))
+row.names(alldata2) <- paste(alldata1$team, alldata1$year)
+# drop team and response variable
+x_vars <- alldata2[, !(names(alldata2) %in% c("team", "attend_game","year","attendance"))]
+# response
+y_var <- alldata2$attend_game
+complete_rows <- complete.cases(x_vars, y_var)
+x_vars <- x_vars[complete_rows, ]
+y_var <- y_var[complete_rows]
+x_scaled <- scale(x_vars)
+fit_3 <- glmnet(x = as.matrix(x_scaled),
+                y = y_var,
+                alpha = 1,
+                lambda = 0.5)
+coef(fit_3)
+fit_3
+```
+
+compare linear regression vs. lasso:
+```{r}
+temp <- coef(fit)
+temp_2 <- as.vector(coef(fit_3))
+cbind.data.frame(temp, temp_2)
+```
+
+decision tree model:
+```{r}
+alldata2 <- alldata1
+rownames(alldata2) <- paste(alldata2$team, alldata2$year)
+alldata2$team <- NULL
+alldata2$attendance <- NULL
+alldata2$year <- NULL
+tree_1 <- rpart(attend_game ~.,
+data = alldata2)
+par(xpd = NA)
+plot(tree_1)
+text(tree_1, digits = 3)
+fancyRpartPlot(tree_1)
+```
+
+hierarchical clustering model:
+```{r}
+alldata2 <- subset(alldata1,select=-(team))
+row.names(alldata2) <- paste(alldata1$team, alldata1$year)
+sdata <- scale(alldata2)
+summary(sdata)
+dist_mat <- dist(sdata, method = "euclidean")
+```
+
+```{r}
+hc <- hclust(dist_mat, method = "average" )
+plot(hc,
+     cex = 0.6,
+     hang = -1 )
+rect.hclust(hc,
+            k = 5,
+            border = 2:6)
+```
+
+```{r}
+hc_1 <- hclust(dist_mat, method = "complete" )
+hc_2 <- hclust(dist_mat, method = "single" )
+dend_1 <- as.dendrogram(hc_1)
+dend_1 <- rotate(dend_1, 1:50)
+dend_1 <- color_branches(dend_1, k=5) 
+dend_1 <- hang.dendrogram(dend_1,hang_height=0.1)
+dend_1 <- set(dend_1, "labels_cex", 0.55)
+par(mar = c(3,3,3,7))
+plot(dend_1, 
+     main = "Clustered Team and Season Data (Complete Linkage)",
+     horiz =  TRUE,  nodePar = list(cex = .007))
+```
+
+shap values:
+```{r}
+alldata2 <- subset(alldata1,select=-c(team,attendance,year))
+y <- alldata2$attend_game
+alldata2$team <- NULL
+alldata2$attendance <- NULL
+alldata2$attend_game <- NULL
+alldata2$year <- NULL
+set.seed(25)
+fit <- xgb.train(
+  params = list(learning_rate = 0.1), 
+  data = xgb.DMatrix(data.matrix(alldata2), label = y),
+  nrounds = 65
+)
+X_explain <- alldata2[sample(nrow(alldata2), 90), ]
+shp <- shapviz(fit, X_pred = data.matrix(X_explain), X = X_explain)
+
+xvars <- c("stars_per_team", "w_l", "population", "payroll")
+sv_importance(shp, show_numbers = TRUE)
+sv_importance(shp, kind = "bee")
+sv_dependence(shp, v = xvars, color_var = xvars, share_y = TRUE)
+```
